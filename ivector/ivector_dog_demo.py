@@ -5,6 +5,18 @@ import librosa
 from sklearn.model_selection import train_test_split
 from sklearn.metrics.pairwise import cosine_similarity
 from ivector_extractor import IVectorExtractor
+import logging
+
+# ========== 日志配置 ==========
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("ivector_dog_demo.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # ========== 特征提取优化 ==========
 def normalize_features(feats):
@@ -39,7 +51,7 @@ def extract_mfcc_improved(wav_path, sr=16000, n_mfcc=20):
         feats = normalize_features(feats)
         return feats
     except Exception as e:
-        print(f"[ERROR] 处理文件 {wav_path} 时出错: {str(e)}")
+        logger.error(f"处理文件 {wav_path} 时出错: {str(e)}")
         raise
 
 # ========== 数据集构建 ==========
@@ -58,11 +70,11 @@ def build_dataset(root_dir):
     for label, dog in enumerate(dog_ids):
         dog_path = os.path.join(root_dir, dog)
         if not os.path.isdir(dog_path):
-            print(f"[INFO] 跳过非目录项: {dog_path}")
+            logger.info(f"跳过非目录项: {dog_path}")
             continue
         
         dog_files = [f for f in os.listdir(dog_path) if f.lower().endswith(".wav")]
-        print(f"[INFO] 处理狗 {dog} 的 {len(dog_files)} 个音频文件")
+        logger.info(f"处理狗 {dog} 的 {len(dog_files)} 个音频文件")
         
         for fname in dog_files:
             fpath = os.path.join(dog_path, fname)
@@ -76,31 +88,254 @@ def build_dataset(root_dir):
                     y.append(label)
                     success_count += 1
                 else:
-                    print(f"[WARNING] 文件特征帧数不足 (仅{feats.shape[0]}帧): {fpath}")
+                    logger.warning(f"文件特征帧数不足 (仅{feats.shape[0]}帧): {fpath}")
                     error_count += 1
             except Exception as e:
-                print(f"[WARNING] 无法处理文件 {fpath}: {str(e)}")
+                logger.warning(f"无法处理文件 {fpath}: {str(e)}")
                 error_count += 1
     
-    print(f"[INFO] 数据集构建完成: 成功处理 {success_count} 个文件, 失败 {error_count} 个文件")
-    print(f"[INFO] 总特征序列数: {len(X)}, 狗类别数: {len(set(y))}")
+    logger.info(f"数据集构建完成: 成功处理 {success_count} 个文件, 失败 {error_count} 个文件")
+    logger.info(f"总特征序列数: {len(X)}, 狗类别数: {len(set(y))}")
     
     return X, np.array(y), dog_ids
 
-import logging
+# ========== 构建单个目标狗模型 ==========
+def build_target_model(root_dir, target_dog_id):
+    """
+    为单个目标狗构建模型
+    """
+    logger.info(f"为狗 {target_dog_id} 构建模型...")
+    
+    # 收集目标狗的特征
+    target_feats = []
+    # 收集其他狗的特征（用于UBM训练）
+    other_feats = []
+    
+    dog_ids = sorted(os.listdir(root_dir))
+    
+    for dog in dog_ids:
+        dog_path = os.path.join(root_dir, dog)
+        if not os.path.isdir(dog_path):
+            continue
+            
+        dog_files = [f for f in os.listdir(dog_path) if f.lower().endswith(".wav")]
+        
+        for fname in dog_files:
+            fpath = os.path.join(dog_path, fname)
+            try:
+                feats = extract_mfcc_improved(fpath)
+                
+                # 过滤掉太短的特征序列
+                if feats.shape[0] > 10:
+                    if dog == target_dog_id:
+                        target_feats.append(feats)
+                    else:
+                        other_feats.append(feats)
+            except Exception as e:
+                logger.warning(f"无法处理文件 {fpath}: {str(e)}")
+                continue
+    
+    if len(target_feats) == 0:
+        raise ValueError(f"没有找到目标狗 {target_dog_id} 的有效样本")
+    
+    logger.info(f"目标狗 {target_dog_id} 样本数: {len(target_feats)}")
+    logger.info(f"其他狗样本数: {len(other_feats)}")
+    
+    # 合并特征用于UBM训练
+    if other_feats:
+        ubm_feats = target_feats + other_feats
+    else:
+        ubm_feats = target_feats
+    
+    return target_feats, ubm_feats
+
+# ========== 单狗测试 ==========
+def test_single_dog(test_dir, target_dog_id, ivec_model, target_ivectors, threshold=0.5):
+    """
+    对单个目标狗进行测试
+    """
+    logger.info(f"开始单狗测试 - 目标狗: {target_dog_id}")
+    
+    # 获取测试文件
+    test_files = [f for f in os.listdir(test_dir) if f.lower().endswith(".wav")]
+    test_files.sort()
+    
+    logger.info(f"测试文件列表: {test_files}")
+    logger.info(f"使用阈值: {threshold}")
+    logger.info("识别结果:")
+    
+    correct = 0
+    total = 0
+    
+    for fname in test_files:
+        fpath = os.path.join(test_dir, fname)
+        try:
+            # 提取特征
+            feats = extract_mfcc_improved(fpath)
+            
+            # 提取i-vector
+            test_ivector = ivec_model.transform(feats)
+            
+            # 计算与目标狗i-vectors的相似度
+            similarities = []
+            for target_ivec in target_ivectors:
+                sim = np.dot(test_ivector, target_ivec)
+                similarities.append(sim)
+            
+            avg_similarity = np.mean(similarities)
+            
+            # 判断是否为目标狗
+            is_target = avg_similarity >= threshold
+            pred_label = target_dog_id if is_target else "background"
+            
+            # 获取真实标签
+            true_label = "background"
+            if fname.lower().startswith(target_dog_id.lower()):
+                true_label = target_dog_id
+            elif fname.lower().startswith("dog"):
+                true_label = fname.split("_")[0]  # 其他狗的ID
+            
+            # 判断是否正确
+            is_correct = (pred_label == true_label)
+            if is_correct:
+                correct += 1
+            total += 1
+            
+            # 输出结果
+            status = "✓" if is_correct else "✗"
+            logger.info(f"  {fname}: {status} 识别为[{pred_label}] (相似度={avg_similarity:.4f}) 实际为[{true_label}]")
+            
+        except Exception as e:
+            logger.error(f"处理文件 {fname} 时出错: {str(e)}")
+            continue
+    
+    accuracy = correct / total if total > 0 else 0
+    logger.info(f"[RESULT] 单狗测试准确率: {accuracy:.4f} ({correct}/{total})")
+    return accuracy
+
+# ========== 全狗测试 ==========
+def test_all_dogs(test_dir, enroll_dir, n_components=4, tv_dim=10):
+    """
+    对所有狗进行测试
+    """
+    logger.info("开始全狗测试...")
+    
+    # 获取所有狗的ID
+    dog_ids = sorted([d for d in os.listdir(enroll_dir) if os.path.isdir(os.path.join(enroll_dir, d))])
+    logger.info(f"所有已建模狗: {dog_ids}")
+    
+    # 获取测试文件
+    test_files = [f for f in os.listdir(test_dir) if f.lower().endswith(".wav")]
+    test_files.sort()
+    
+    logger.info(f"测试文件列表: {test_files}")
+    
+    # 为每只狗构建模型并存储
+    dog_models = {}
+    
+    for dog_id in dog_ids:
+        try:
+            logger.info(f"构建狗 {dog_id} 的模型...")
+            target_feats, ubm_feats = build_target_model(enroll_dir, dog_id)
+            
+            # 训练i-vector提取器
+            feature_dim = 60  # 默认MFCC特征维度
+            if len(ubm_feats) > 0 and len(ubm_feats[0]) > 0:
+                feature_dim = ubm_feats[0].shape[1]
+            
+            adaptive_tv_dim = min(tv_dim, max(1, feature_dim // 2))
+            
+            ivec = IVectorExtractor(n_components=n_components, tv_dim=adaptive_tv_dim)
+            ivec.fit(ubm_feats)
+            
+            # 提取目标狗的i-vectors
+            target_ivectors = []
+            for feats in target_feats:
+                ivec_feat = ivec.transform(feats)
+                target_ivectors.append(ivec_feat)
+            target_ivectors = np.array(target_ivectors)
+            
+            dog_models[dog_id] = (ivec, target_ivectors)
+            logger.info(f"狗 {dog_id} 模型构建完成")
+            
+        except Exception as e:
+            logger.error(f"构建狗 {dog_id} 模型时出错: {str(e)}")
+            continue
+    
+    if not dog_models:
+        logger.error("没有成功构建任何狗的模型")
+        return
+    
+    # 测试每个文件
+    logger.info("开始测试...")
+    results = []
+    correct = 0
+    total = 0
+    
+    for fname in test_files:
+        logger.info(f"\n{fname}:")
+        file_scores = {}
+        
+        # 获取真实标签
+        true_label = "background"
+        if fname.lower().startswith("dog"):
+            true_label = fname.split("_")[0]
+        
+        try:
+            # 对每只狗计算相似度
+            for dog_id, (ivec_model, target_ivectors) in dog_models.items():
+                try:
+                    fpath = os.path.join(test_dir, fname)
+                    feats = extract_mfcc_improved(fpath)
+                    test_ivector = ivec_model.transform(feats)
+                    
+                    # 计算相似度
+                    similarities = []
+                    for target_ivec in target_ivectors:
+                        sim = np.dot(test_ivector, target_ivec)
+                        similarities.append(sim)
+                    
+                    avg_similarity = np.mean(similarities)
+                    file_scores[dog_id] = avg_similarity
+                    logger.info(f"  对狗 {dog_id} 的相似度 = {avg_similarity:.4f}")
+                    
+                except Exception as e:
+                    logger.warning(f"计算狗 {dog_id} 相似度时出错: {str(e)}")
+                    file_scores[dog_id] = 0.0
+                    continue
+            
+            # 选择最高相似度的狗
+            if file_scores:
+                best_dog = max(file_scores, key=file_scores.get)
+                best_score = file_scores[best_dog]
+                pred_label = best_dog if best_score >= 0.5 else "background"
+                
+                is_correct = (pred_label == true_label)
+                if is_correct:
+                    correct += 1
+                total += 1
+                
+                status = "✓" if is_correct else "✗"
+                logger.info(f"  {status} 预测为: {pred_label} (最高相似度={best_score:.4f}) 实际为: {true_label}")
+                results.append((fname, pred_label, true_label, best_score, file_scores))
+                
+        except Exception as e:
+            logger.error(f"处理文件 {fname} 时出错: {str(e)}")
+            continue
+    
+    # 输出汇总结果
+    logger.info(f"\n[INFO] 所有测试完成")
+    logger.info(f"\n[INFO] 汇总结果:")
+    for fname, pred, true_label, score, all_scores in results:
+        status = "✓" if pred == true_label else "✗"
+        logger.info(f"  {fname}: {status} 预测={pred} 实际={true_label} 最高相似度={score:.4f}")
+    
+    accuracy = correct / total if total > 0 else 0
+    logger.info(f"\n[RESULT] 总体准确率: {accuracy:.4f} ({correct}/{total})")
+    return accuracy
+
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, auc
-
-# 配置日志系统
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("dog_voice_recognition.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
 
 def adaptive_n_components(data_size, feature_dim):
     """根据数据量和特征维度自适应调整高斯分量数"""
@@ -161,106 +396,73 @@ def visualize_results(genuine_scores, impostor_scores, output_dir="./analysis_ou
     return eer, roc_auc
 
 # ========== 主流程 ==========
-def main(data_dir, n_components=4, tv_dim=100):
+def main(data_dir, test_dir, target_dog=None, mode="all", n_components=4, tv_dim=100):
     logger.info("开始狗声纹识别实验")
-    logger.info(f"数据集目录: {data_dir}")
+    logger.info(f"注册数据目录: {data_dir}")
+    logger.info(f"测试数据目录: {test_dir}")
+    logger.info(f"运行模式: {mode}")
     
-    # 加载数据集
-    logger.info("加载数据集...")
-    X, y, dog_ids = build_dataset(data_dir)
+    if mode == "single" and target_dog:
+        # 单狗测试模式
+        logger.info(f"目标狗: {target_dog}")
+        
+        try:
+            # 构建目标狗模型
+            target_feats, ubm_feats = build_target_model(data_dir, target_dog)
+            
+            # 训练i-vector提取器
+            logger.info(f"训练i-vector提取器 (高斯分量数: {n_components}, i-vector维度: {tv_dim})...")
+            feature_dim = 60  # 默认MFCC特征维度
+            if len(ubm_feats) > 0 and len(ubm_feats[0]) > 0:
+                feature_dim = ubm_feats[0].shape[1]
+            
+            adaptive_tv_dim = min(tv_dim, max(1, feature_dim // 2))
+            
+            ivec = IVectorExtractor(n_components=n_components, tv_dim=adaptive_tv_dim)
+            ivec.fit(ubm_feats)
+            
+            # 提取目标狗的i-vectors
+            target_ivectors = []
+            for feats in target_feats:
+                ivec_feat = ivec.transform(feats)
+                target_ivectors.append(ivec_feat)
+            target_ivectors = np.array(target_ivectors)
+            
+            # 执行单狗测试
+            test_single_dog(test_dir, target_dog, ivec, target_ivectors)
+            
+        except Exception as e:
+            logger.error(f"单狗测试过程中出错: {str(e)}")
+            raise
+    else:
+        # 全狗测试模式
+        try:
+            test_all_dogs(test_dir, data_dir, n_components, tv_dim)
+        except Exception as e:
+            logger.error(f"全狗测试过程中出错: {str(e)}")
+            raise
     
-    if len(X) == 0:
-        logger.error("未能加载到任何有效数据，程序终止")
-        return
-    
-    # 切分训练/测试
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=y
-    )
-    logger.info(f"训练集大小: {len(X_train)}, 测试集大小: {len(X_test)}")
-    
-    # 自适应调整高斯分量数
-    feature_dim = X_train[0].shape[1]
-    adaptive_components = adaptive_n_components(len(X_train), feature_dim)
-    if n_components != adaptive_components:
-        logger.info(f"根据数据特征自适应调整高斯分量数: {n_components} → {adaptive_components}")
-        n_components = adaptive_components
-    
-    # 自适应调整i-vector维度
-    adaptive_tv_dim = min(tv_dim, feature_dim // 2)  # 确保tv_dim不超过特征维度的一半
-    if tv_dim != adaptive_tv_dim:
-        logger.info(f"根据特征维度调整i-vector维度: {tv_dim} → {adaptive_tv_dim}")
-        tv_dim = adaptive_tv_dim
-    
-    # 训练i-vector提取器
-    logger.info(f"训练i-vector提取器 (高斯分量数: {n_components}, i-vector维度: {tv_dim})...")
-    ivec = IVectorExtractor(n_components=n_components, tv_dim=tv_dim)
-    ivec.fit(X_train)
-    
-    # 提取i-vectors（使用批量处理提高效率）
-    logger.info("提取i-vectors...")
-    iv_train = ivec.batch_transform(X_train)
-    iv_test = ivec.batch_transform(X_test)
-    
-    # 保存训练好的模型
-    model_dir = "models"
-    os.makedirs(model_dir, exist_ok=True)
-    model_path = os.path.join(model_dir, f"ivector_extractor_{n_components}g_{tv_dim}d.pkl")
-    ivec.save(model_path)
-    
-    # 评估
-    logger.info("评估模型性能...")
-    sims, labels = [], []
-    
-    # 使用矩阵运算加速相似度计算
-    sim_matrix = cosine_similarity(iv_test, iv_train)
-    for i in range(len(iv_test)):
-        for j in range(len(iv_train)):
-            sims.append(sim_matrix[i, j])
-            labels.append(int(y_test[i] == y_train[j]))
-    
-    sims, labels = np.array(sims), np.array(labels)
-    pos = sims[labels == 1]
-    neg = sims[labels == 0]
-    
-    # 计算评估指标
-    pos_mean = pos.mean()
-    neg_mean = neg.mean()
-    eer, roc_auc = visualize_results(pos, neg)
-    
-    # 记录结果
-    logger.info(f"评估结果:")
-    logger.info(f"  同一狗平均相似度: {pos_mean:.6f}")
-    logger.info(f"  不同狗平均相似度: {neg_mean:.6f}")
-    logger.info(f"  等错误率(EER): {eer:.6f}")
-    logger.info(f"  ROC曲线下面积(AUC): {roc_auc:.6f}")
-    logger.info(f"  区分度(同一狗-不同狗相似度): {pos_mean - neg_mean:.6f}")
-    
-    # 保存结果
-    scores_dir = "scores"
-    os.makedirs(scores_dir, exist_ok=True)
-    
-    pos_file = os.path.join(scores_dir, "positive_scores.txt")
-    neg_file = os.path.join(scores_dir, "negative_scores.txt")
-    
-    np.savetxt(pos_file, pos)
-    np.savetxt(neg_file, neg)
-    
-    logger.info(f"相似度分数已保存:")
-    logger.info(f"  同一狗分数: {pos_file} (共{len(pos)}个样本)")
-    logger.info(f"  不同狗分数: {neg_file} (共{len(neg)}个样本)")
     logger.info("实验完成")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default="./youtube_wav/brakng_dog_datasets", required=True, help="数据集目录 (dog1/, dog2/...)")
+    parser.add_argument("--data_dir", type=str, default="./youtube_wav/brakng_dog_datasets", required=True, help="注册数据集目录 (dog1/, dog2/...)")
+    parser.add_argument("--test_dir", type=str, default="./youtube_wav/test", help="测试数据集目录")
+    parser.add_argument("--target_dog", type=str, help="目标狗ID (用于单狗测试)")
+    parser.add_argument("--mode", type=str, choices=["single", "all"], default="all", help="测试模式: single(单狗) 或 all(全狗)")
     parser.add_argument("--n_components", type=int, default=4, help="GMM 高斯数")
     parser.add_argument("--tv_dim", type=int, default=10, help="i-vector 维度，不能超过特征维度20")
     args = parser.parse_args()
 
-    main(args.data_dir, args.n_components, args.tv_dim)
+    main(args.data_dir, args.test_dir, args.target_dog, args.mode, args.n_components, args.tv_dim)
 
 
 """
-D:/ProgramData/anaconda3/envs/ai/python.exe ivector/ivector_dog_demo.py --data_dir ./youtube_wav/brakng_dog_datasets
+使用示例:
+
+# 全狗测试模式
+python ivector/ivector_dog_demo.py --data_dir ./youtube_wav/brakng_dog_datasets --test_dir ./youtube_wav/test
+
+# 单狗测试模式
+python ivector/ivector_dog_demo.py --data_dir ./youtube_wav/brakng_dog_datasets --test_dir ./youtube_wav/test --target_dog dog1 --mode single
 """
