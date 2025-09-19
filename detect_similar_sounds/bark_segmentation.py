@@ -354,5 +354,6 @@ if __name__ == "__main__":
         print(f"Saved segment {i} to {output_path}")
 
 """
-python detect_similar_sounds/bark_segmentation.py youtube_wav/bark_segmentation/bark01.mp3
+python detect_similar_sounds/bark_segmentation.py youtube_wav/bark_segmentation/processed_template_preserving/outdoor_braking_clean_preserving.wav
+
 """

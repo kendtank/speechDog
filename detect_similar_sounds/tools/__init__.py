@@ -11,11 +11,8 @@ from .compare_bandpass import *
 
 from .compare_audio_processor_v2 import *
 from .comparison_visualizer import *
-from .precise_bark_segmentation import *
+
 
 __all__ = [
     'compare_bandpass',
-    'compare_audio_processor_v2.py',
-    'comparison_visualizer.py',
-    'precise_bark_segmentation'
 ]
