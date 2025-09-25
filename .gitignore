@@ -1,8 +1,7 @@
 youtube_wav/
-*.csv
+datasets/
 *.npz
 *.log
-models/
 *.pkl
 *.txt
 *.wav

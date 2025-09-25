@@ -140,7 +140,7 @@ class BatchLogger(tf.keras.callbacks.Callback):
     def on_train_batch_end(self, batch, logs=None):
         if batch % 10 == 0:
             print(f"[Batch {batch}] loss={logs['loss']:.4f}, acc={logs['accuracy']:.4f}")
-
+raise RuntimeError("请先运行此文件")
 # ================== 训练 ==================
 train_gen = data_generator(train_files)
 val_gen = data_generator(val_files)

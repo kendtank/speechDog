@@ -11,8 +11,9 @@
 import tensorflow as tf
 
 # ================== 配置 ==================
-SAVED_MODEL_DIR = "tiny_cnn_bark_tf_savedmodel"  # 你的 SavedModel 路径
-TFLITE_MODEL_PATH = "tiny_cnn_bark.tflite"       # 转换后保存路径
+SAVED_MODEL_DIR = r"D:\kend\myPython\speechDog-master\tiny\saved_models\20250920_183231\dog_embedding_model"  # 你的
+# SavedModel 路径
+TFLITE_MODEL_PATH = "tiny_bark_embedding.tflite"       # 转换后保存路径
 
 # ================== 创建转换器 ==================
 converter = tf.lite.TFLiteConverter.from_saved_model(SAVED_MODEL_DIR)

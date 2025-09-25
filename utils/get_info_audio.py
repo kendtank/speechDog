@@ -2,7 +2,7 @@
 """
 @Time    : 2025/9/19 上午11:17
 @Author  : Kend
-@FileName: khz.py
+@FileName: get_info_audio.py
 @Software: PyCharm
 @modifier:
 """

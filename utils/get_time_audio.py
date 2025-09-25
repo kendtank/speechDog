@@ -58,6 +58,5 @@ if __name__ == "__main__":
     audio_dir = sys.argv[1]
     scan_directory(audio_dir)
 """
-# 示例用法
 python utils\get_time_audio.py D:\\work\\datasets\\tinyML\\bark_origion
 """
